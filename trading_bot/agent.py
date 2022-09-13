@@ -1,352 +1,224 @@
-import os
-import logging
-
+import random
+from tensorflow.keras import Model
+from collections import deque
 import numpy as np
+import tensorflow as tf
+from tensorflow import squeeze,expand_dims
+import tensorflow.keras.backend as K
+from tensorflow.keras import losses
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import load_model, clone_model
+from tensorflow.keras.layers import Dense, Input, BatchNormalization, Activation, Dropout, MaxPool1D
+from tensorflow.keras.optimizers import Adam
+from keras_radam.training import RAdamOptimizer
+from trading_bot.MultiHeadAttention import MultiHeadSelfAttention
+from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
+import time
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
-from tqdm import tqdm
 
-from .utils import (
-    format_currency,
-    format_position
-)
-from .ops import (
-    get_state
-)
+def huber_loss(y_true, y_pred, clip_delta=1.0):
+    """Huber loss - Custom Loss Function for Q Learning
+
+    Links: 	https://en.wikipedia.org/wiki/Huber_loss
+            https://jaromiru.com/2017/05/27/on-using-huber-loss-in-deep-q-learning/
+    """
+    error = y_true - y_pred
+    cond = K.abs(error) <= clip_delta
+    squared_loss = 0.5 * K.square(error)
+    quadratic_loss = 0.5 * K.square(clip_delta) + clip_delta * (K.abs(error) - clip_delta)
+    return K.mean(tf.where(cond, squared_loss, quadratic_loss))
 
 
-def train_model(agent, episode, data, ep_count=100, batch_size=32, window_size=10, purchasingAbility=5,
-                serviceChargeRate=0.):
-    total_profit = 0
-    data_length = len(data) - 1
-    agent.holdAmount = 0
-    avg_loss = []
+class Agent:
+    """ Stock Trading Bot """
 
-    state = get_state(data, 0, window_size + 1)
-    holdShare = 0
-    maxAmount = 0
-    for t in tqdm(range(data_length), total=data_length, leave=True, desc='Episode {}/{}'.format(episode, ep_count)):
-        if agent.holdAmount > maxAmount:
-            maxAmount = agent.holdAmount
-        reward = 0
-        next_state = get_state(data, t + 1, window_size + 1)
-        done = (t == data_length - 1)
-        # select an action
-        action, actWeight = agent.act(state, is_eval=True)
-        if done and holdShare > 0:
-            bought_price = agent.holdAmount / holdShare
-            serviceCharge = serviceChargeRate * agent.holdAmount
-            # if data[t] > bought_price:
-            delta = (data[t] - bought_price) * holdShare  # *(1-0.015)
-            total_profit += delta
-            total_profit -= serviceCharge
-            reward = delta
-            agent.holdAmount = 0
-            purchasingAbility = purchasingAbility + (delta / data[0])
-            # else:
-            #     bought_price = agent.holdAmount / holdShare
-            #     diff = data[t] - bought_price
-            #     reward = diff * holdShare
-            # pass
-        # elif data[t] > np.mean(data[t-5:t-1]):
-        #     action == 0
+    def __init__(self, state_size, strategy="t-dqn", reset_every=1000, pretrained=False, model_name=None):
+        self.strategy = strategy
+        self.memoryLenDefault = 1000
+
+        # agent config
+        self.state_size = state_size    	# normalized previous days
+        self.action_size = 3           		# [sit, buy, sell]
+        self.model_name = model_name
+        self.inventory = []
+        self.memory = deque(maxlen=self.memoryLenDefault)
+        self.first_iter = True
+
+        # model config
+        self.model_name = model_name
+        self.gamma = 0.95 # affinity for long term reward
+        self.epsilon = 1.0
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.learning_rate = 0.001
+        self.loss = huber_loss
+        self.custom_objects = {"huber_loss": huber_loss}  # important for loading the model from memory
+        self.optimizer = RAdamOptimizer(learning_rate=self.learning_rate)
+
+        if pretrained and self.model_name is not None:
+            self.model = self._model()
+            self.load()
         else:
-            # BUY
-            if action == 1 and purchasingAbility - holdShare >= 100:
-                bugShare = round((purchasingAbility - holdShare) * actWeight)
-                bugShare = round(bugShare / 100) * 100
-                if bugShare < 100:
-                    bugShare = 100
-                try:
-                    bought_price = agent.holdAmount / holdShare
-                    # diff = data[t] - bought_price
-                    diff = bought_price - data[t]
-                    reward = diff * bugShare
-                except:
-                    pass
-                holdShare += bugShare
-                agent.holdAmount += data[t] * bugShare
-                serviceCharge = data[t] * bugShare * serviceChargeRate
-                total_profit -= serviceCharge
+            self.model = self._model()
 
-                # reward = -serviceCharge
-            # SELL
-            elif action == 2 and holdShare > 0:
-                bought_price = agent.holdAmount / holdShare
-                diff = data[t] - bought_price
-                # if diff > 0:
-                sellShare = round(holdShare * actWeight)
-                sellShare = round(sellShare / 100) * 100
-                if sellShare < 100 and holdShare >= 100:  # 最小卖出份额为1
-                    sellShare = 100
-                if holdShare < 100:
-                    sellShare = holdShare
-                holdShare -= sellShare
-                agent.holdAmount -= sellShare * bought_price
-                delta = diff * sellShare
-                serviceCharge = sellShare * data[t] * serviceChargeRate
-                total_profit -= serviceCharge
-                reward = delta  # max(delta, 0)
-                total_profit += delta
-                purchasingAbility = purchasingAbility + (delta / data[0])
-            # HOLD
-            elif holdShare > 0:
-                bought_price = agent.holdAmount / holdShare
-                diff = data[t] - bought_price
-                reward = diff * holdShare
-            else:
-                pass
-        agent.remember(state, action, reward, next_state, done, actWeight)
+        # strategy config
+        if self.strategy in ["t-dqn", "double-dqn"]:
+            self.n_iter = 1
+            self.reset_every = reset_every
 
-        if len(agent.memory) > batch_size:
-            loss = agent.train_experience_replay(batch_size)
-            avg_loss.append(loss)
+            # target network
+            self.target_model = clone_model(self.model)
+            self.target_model.set_weights(self.model.get_weights())
 
-        state = next_state
+    def _model(self):
+        """Creates the model
+        """
+        input_layer = Input(shape = (self.state_size,))
+        h1 = Dense(64, activation="relu")(input_layer)
+        h1_normed = BatchNormalization()(h1)
+        h2 = Dense(128, activation="relu")(h1_normed)
+        h2_normed = BatchNormalization()(h2)
+        h3 = Dense(256, activation="relu")(h2_normed)
+        h3_normed = BatchNormalization()(h3)
+        h4 = squeeze(MultiHeadSelfAttention(4, 256)(h3_normed), 1)
+        h4_normed = BatchNormalization()(h4)
+        h5 = Dense(256, activation="relu")(h4_normed)
+        h5_normed = BatchNormalization()(h5)
+        h6 = Dense(128, activation="relu")(h5_normed + h3_normed)
+        h6_normed = BatchNormalization()(h6)
+        h7 = Dense(64, activation="relu")(h6_normed + h2_normed)
+        h7_normed = BatchNormalization()(h7)
+        output = Dense(self.action_size)(h7_normed)
+        weight = Dense(1, activation="sigmoid")(h7_normed)
+        model = Model(input_layer, [output, weight])
+        model.compile(loss=[self.loss, losses.mean_squared_error], optimizer=self.optimizer)
+        return model
 
-    # if episode % 10 == 0:
-    #     agent.save()
-    # agent.reset()
-    return (episode, ep_count, total_profit, np.mean(np.array(avg_loss)), purchasingAbility * data[0])
+    def reset(self):
+        self.memory = deque(maxlen=self.memoryLenDefault)
 
+    def remember(self, state, action, reward, next_state, done, actWeight):
+        """Adds relevant data to memory
+        """
+        self.memory.append((state, action, reward, next_state, done, actWeight))
 
-def evaluate_model(agent, data, window_size, debug, purchasingAbility=5, serviceChargeRate=0.):
-    total_profit = 0
-    data_length = len(data) - 1
-    total_profits = []
-    history = []
-    agent.holdAmount = 0
-    holdShare = 0
-    state = get_state(data, 0, window_size + 1)
-    maxAmount = purchasingAbility * data[0]
-    for t in range(data_length):
-        # if agent.holdAmount > maxAmount:
-        #     maxAmount = agent.holdAmount
-        reward = 0
-        next_state = get_state(data, t + 1, window_size + 1)
-        done = (t == data_length - 1)
-        # select an action
-        action, actWeight = agent.act(state, is_eval=True)
-        # action, actWeight = 1, 1
-        if done:
-            if holdShare > 0:
-                serviceCharge = serviceChargeRate * agent.holdAmount
-                bought_price = agent.holdAmount / holdShare
-                # if data[t] > bought_price:
-                delta = (data[t] - bought_price) * holdShare  # *(1-0.015)
-                purchasingAbility = purchasingAbility + (delta / data[0])
-                sellShare = holdShare
-                holdShare -= sellShare
-                total_profit += delta
-                reward = delta
-                total_profit -= serviceCharge
-                history.append((data[t], "SELL", sellShare))
-                if debug:
-                    logging.debug("Sell at: {} | Position: {}; sellShare: {}; holdShare: {}; profit: {}".format(
-                        format_currency(data[t]), format_position(data[t] - bought_price), sellShare, holdShare,
-                        format_position(delta)))
-                agent.holdAmount = 0
-                # else:
-                #     bought_price = agent.holdAmount / holdShare
-                #     diff = data[t] - bought_price
-                #     reward = diff * holdShare
-                #     history.append((data[t], "HOLD", 0))
-                #     if debug:
-                #         logging.debug("Hold at: {} | Position: {}; holdShare: {} holdAmount: {}".format(
-                #             format_currency(data[t]), format_position(data[t] - bought_price), holdShare, agent.holdAmount))
-            else:
-                history.append((data[t], "HOLD", 0))
-        # elif data[t] > np.mean(data[t - 5:t - 1]):
-        #     history.append((data[t], "HOLD", 0))
-        #     action == 0
-        else:
-            # BUY
-            if action == 1 and purchasingAbility - holdShare >= 100:
-                bugShare = round((purchasingAbility - holdShare) * actWeight)
-                bugShare = round(bugShare / 100) * 100
-                if bugShare < 100:
-                    bugShare = 100
-                holdShare += bugShare
-                agent.holdAmount += data[t] * bugShare
-                history.append((data[t], "BUY", bugShare))
-                serviceCharge = data[t] * bugShare * serviceChargeRate
-                try:
-                    bought_price = agent.holdAmount / holdShare
-                    diff = bought_price - data[t]
-                    reward = diff * bugShare
-                except:
-                    pass
-                total_profit -= serviceCharge
-                if debug:
-                    logging.debug(
-                        "Buy at: {}; bugShare: {}; holdShare: {}; profit: {}".format(format_currency(data[t]), bugShare,
-                                                                                     holdShare, format_position(
-                                0 - serviceCharge)))
+    def act(self, state, is_eval=False):
+        """Take action from given possible set of actions
+        """
+        # take random action in order to diversify experience at the beginning
+        if not is_eval and random.random() <= self.epsilon:
+            return random.randrange(self.action_size)
 
-            # SELL
-            elif action == 2 and holdShare > 0:
-                bought_price = agent.holdAmount / holdShare
-                diff = data[t] - bought_price
-                # if diff > 0:
-                sellShare = round(holdShare * actWeight)
-                sellShare = round(sellShare / 100) * 100
-                if sellShare < 100 and holdShare >= 100:  # 最小卖出份额为1
-                    sellShare = 100
-                if holdShare < 100:
-                    sellShare = holdShare
-                holdShare -= sellShare
-                agent.holdAmount -= sellShare * bought_price
-                delta = diff * sellShare
-                purchasingAbility = purchasingAbility + (delta / data[0])
-                reward = delta  # max(delta, 0)
-                total_profit += delta
-                serviceCharge = sellShare * data[t] * serviceChargeRate
-                total_profit -= serviceCharge
-                history.append((data[t], "SELL", sellShare))
-                if debug:
-                    logging.debug("Sell at: {} | Position: {}; sellShare: {}; holdShare: {}; profit: {}".format(
-                        format_currency(data[t]), format_position(data[t] - bought_price), sellShare, holdShare,
-                        format_position(delta - serviceCharge)))
-                # else:
-                #     bought_price = agent.holdAmount / holdShare
-                #     diff = data[t] - bought_price
-                #     reward = diff * holdShare
-                #     history.append((data[t], "HOLD", 0))
-            # HOLD
-            else:
-                # if holdShare > 0:
-                #     bought_price = agent.holdAmount / holdShare
-                #     diff = data[t] - bought_price
-                #     reward = diff * holdShare
-                # pass
-                history.append((data[t], "HOLD", 0))
-                # if holdShare > 0:
-                #     bought_price = agent.holdAmount / holdShare
-                #     diff = data[t] - bought_price
-                #     total_profit += (diff * holdShare)
-        # agent.remember(state, action, reward, next_state, done)
-        # total_profits.append(total_profit)
-        if total_profit == 0 and agent.holdAmount > 0:
-            bought_price = agent.holdAmount / holdShare
-            total_profits.append(agent.holdAmount * (data[t] - bought_price) / bought_price)
-        else:
-            if holdShare == 0:
-                total_profits.append(total_profit)
-            else:
-                bought_price = agent.holdAmount / holdShare
-                total_profits.append(total_profit * (1 + (data[t] - bought_price) / bought_price))
-        # agent.memory.append((state, action, reward, next_state, done))
-        state = next_state
-    return total_profit, history, maxAmount, total_profits
+        if self.first_iter:
+            self.first_iter = False
+            return 0, 1# make a definite buy on the first iter
 
+        action_probs, actWeight = self.model.predict_on_batch(state)
+        action = np.argmax(action_probs[0])
+        return action, actWeight[0][0]
 
-def test_model(agent, data, window_size, debug, purchasingAbility=5, serviceChargeRate=0.):
-    total_profit = 0
-    data_length = len(data) - 1
-    total_profits = []
-    history = []
-    agent.holdAmount = 0
-    holdShare = 0
-    state = get_state(data, 0, window_size + 1)
-    maxAmount = 0
-    for t in range(data_length):
-        if agent.holdAmount > maxAmount:
-            maxAmount = agent.holdAmount
-        reward = 0
-        next_state = get_state(data, t + 1, window_size + 1)
-        done = (t == data_length - 1)
-        # select an action
-        action, actWeight = agent.act(state, is_eval=True)
-        if done:
-            if agent.holdAmount > 0:
-                serviceCharge = serviceChargeRate * agent.holdAmount
-                bought_price = agent.holdAmount / holdShare
-                if data[t] > bought_price:
-                    delta = (data[t] - bought_price) * holdShare  # *(1-0.015)
-                    sellShare = holdShare
-                    holdShare -= sellShare
-                    total_profit += delta
-                    reward = delta
-                    total_profit -= serviceCharge
-                    history.append((data[t], "SELL", sellShare))
-                    if debug:
-                        logging.debug("Sell at: {} | Position: {}; sellShare: {}; holdShare: {}".format(
-                            format_currency(data[t]), format_position(data[t] - bought_price), sellShare, holdShare))
-                    agent.holdAmount = 0
+    def train_experience_replay(self, batch_size):
+        """Train on previous experiences in memory
+        """
+        random.shuffle(self.memory)
+        mini_batch = list(self.memory)[:batch_size]
+        X_train, y_train, X_weights, weights = [], [], [], []
+
+        # DQN
+        if self.strategy == "dqn":
+            for state, action, reward, next_state, done, x_weights in mini_batch:
+                nextPre = self.model.predict_on_batch(next_state)
+                if done:
+                    target = reward
                 else:
-                    bought_price = agent.holdAmount / holdShare
-                    diff = data[t] - bought_price
-                    reward = diff * holdShare
-                    history.append((data[t], "HOLD", 0))
-                    if debug:
-                        logging.debug("Hold at: {} | Position: {}; holdShare: {} holdAmount: {}".format(
-                            format_currency(data[t]), format_position(data[t] - bought_price), holdShare,
-                            agent.holdAmount))
-            else:
-                # pass
-                history.append((data[t], "HOLD", 0))
-        # elif data[t] > np.mean(data[t - 5:t - 1]):
-        #     history.append((data[t], "HOLD", 0))
-        #     action == 0
-        else:
-            # BUY
-            if action == 1 and purchasingAbility - holdShare >= 100:
-                bugShare = round((purchasingAbility - holdShare) * actWeight)
-                if bugShare < 100:
-                    bugShare = 100
-                holdShare += bugShare
-                agent.holdAmount += data[t] * bugShare
-                history.append((data[t], "BUY", bugShare))
-                serviceCharge = data[t] * bugShare * serviceChargeRate
-                reward = -serviceCharge
-                total_profit -= serviceCharge
-                if debug:
-                    logging.debug(
-                        "Buy at: {}; bugShare: {}; holdShare: {}".format(format_currency(data[t]), bugShare, holdShare))
+                    # approximate deep q-learning equation
+                    target = reward + self.gamma * np.amax(nextPre[0][0])
 
-            # SELL
-            elif action == 2 and holdShare > 0:
-                bought_price = agent.holdAmount / holdShare
-                diff = data[t] - bought_price
-                if diff > 0:
-                    sellShare = round(holdShare * actWeight)
-                    if sellShare < 100 and holdShare >= 100:  # 最小卖出份额为1
-                        sellShare = 100
-                    holdShare -= sellShare
-                    agent.holdAmount -= sellShare * bought_price
-                    delta = diff * sellShare
-                    reward = delta  # max(delta, 0)
-                    total_profit += delta
-                    serviceCharge = sellShare * data[t] * serviceChargeRate
-                    total_profit -= serviceCharge
-                    history.append((data[t], "SELL", sellShare))
-                    if debug:
-                        logging.debug("Sell at: {} | Position: {}; sellShare: {}; holdShare: {}".format(
-                            format_currency(data[t]), format_position(data[t] - bought_price), sellShare, holdShare))
+                # estimate q-values based on current state
+                q_values, weight = nextPre[0], nextPre[1]
+                # update the target for current action based on discounted reward
+                q_values[0][action] = target
+                #weight = weight# + self.gamma * np.amax(nextPre[0][0])
+
+                X_train.append(state[0])
+                y_train.append(q_values[0])
+                X_weights.append(x_weights)
+                weights.append(weight)
+
+        # DQN with fixed targets
+        elif self.strategy == "t-dqn":
+            if self.n_iter % self.reset_every == 0:
+                # reset target model weights
+                self.target_model.set_weights(self.model.get_weights())
+
+            for state, action, reward, next_state, done, x_weights in mini_batch:
+
+                if done:
+                    target = reward
                 else:
-                    if holdShare > 0:
-                        bought_price = agent.holdAmount / holdShare
-                        diff = data[t] - bought_price
-                        reward = diff * holdShare
-                    # pass
-                    history.append((data[t], "HOLD", 0))
-            # HOLD
-            else:
-                if holdShare > 0:
-                    bought_price = agent.holdAmount / holdShare
-                    diff = data[t] - bought_price
-                    reward = diff * holdShare
-                # pass
-                history.append((data[t], "HOLD", 0))
-        agent.remember(state, action, reward, next_state, done, actWeight)
-        if total_profit == 0 and agent.holdAmount > 0:
-            bought_price = agent.holdAmount / holdShare
-            total_profits.append(agent.holdAmount * (data[t] - bought_price) / bought_price)
+                    nextPre = self.target_model.predict_on_batch(next_state)[0][0]
+                    # approximate deep q-learning equation with fixed targets
+                    target = reward + self.gamma * np.amax(nextPre)
+
+                # estimate q-values based on current state
+                q_values, weight = self.model.predict_on_batch(state)
+                # update the target for current action based on discounted reward
+                q_values[0][action] = target
+
+                X_train.append(state[0])
+                y_train.append(q_values[0])
+                weights.append(weight)
+                X_weights.append(x_weights)
+
+        # Double DQN
+        elif self.strategy == "double-dqn":
+            if self.n_iter % self.reset_every == 0:
+                # reset target model weights
+                self.target_model.set_weights(self.model.get_weights())
+            # time_start = time.time()
+            for state, action, reward, next_state, done, x_weights in mini_batch:
+                nextpre = self.model.predict_on_batch(next_state)
+                tarPre = self.target_model.predict_on_batch(next_state)
+                if done:
+                    target = reward
+                else:
+                    # approximate double deep q-learning equation
+                    target = reward + self.gamma * tarPre[0][0][np.argmax(nextpre[0][0])]
+
+                # estimate q-values based on current state
+                q_values, weight = nextpre[0], nextpre[1]
+                # update the target for current action based on discounted reward
+                q_values[0][action] = target
+                weight = weight
+                # if action == 0:
+                #     weight = weight * self.gamma
+
+                X_train.append(state[0])
+                y_train.append(q_values[0])
+                weights.append(weight)
+                X_weights.append(x_weights)
+            # time_end = time.time()
+            # print('totally cost', time_end - time_start)
+
         else:
-            if holdShare == 0:
-                total_profits.append(total_profit)
-            else:
-                bought_price = agent.holdAmount / holdShare
-                total_profits.append(total_profit * (1 + (data[t] - bought_price) / bought_price))
-        # agent.memory.append((state, action, reward, next_state, done))
-        state = next_state
-    return total_profit, history, maxAmount, total_profits
+            raise NotImplementedError()
+        # update q-function parameters based on huber loss gradient
+        loss = self.model.fit(
+            [tf.convert_to_tensor(X_train, dtype=np.float32), tf.convert_to_tensor(X_weights, dtype=np.float32)],
+            [tf.convert_to_tensor(y_train, dtype=np.float32), tf.convert_to_tensor(weights, dtype=np.float32)],
+            epochs=1, verbose=0
+        ).history["loss"][0]
+
+        # as the training goes on we want the agent to
+        # make less random and more optimal decisions
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+        return loss
+
+    def save(self):
+        self.model.save_weights("models/{}.h5".format(self.model_name))
+
+    def load(self):
+        self.model.load_weights("models/{}.h5".format(self.model_name))
