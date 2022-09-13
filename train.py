@@ -4,9 +4,7 @@ import os
 from docopt import docopt
 
 from trading_bot.agent import Agent
-# from trading_bot.agent_MLP import Agent
 from trading_bot.methods import train_model, evaluate_model
-# from trading_bot.methods_MLP import train_model, evaluate_model
 from trading_bot.utils import (
     get_stock_data,
     format_currency,
@@ -24,8 +22,6 @@ def main(train_stock, val_stock, window_size, batch_size, ep_count,
     agent = Agent(window_size, strategy=strategy, pretrained=pretrained, model_name=model_name)
     train_data = get_stock_data(train_stock)
     val_data = get_stock_data(val_stock)
-    # val_data_reversed = list(reversed(val_data))
-    # val_data = val_data + val_data_reversed
 
     bestResult = -999999999999
     for episode in range(1, ep_count + 1):
