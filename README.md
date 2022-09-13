@@ -8,7 +8,7 @@ Generally, Reinforcement Learning is a family of machine learning techniques tha
 
 ## Results
 
-(Extract all files) You can obtain similar visualizations of your model evaluations using the [notebook](./visualize.ipynb) provided.
+You can obtain similar visualizations of your model evaluations using the [notebook](./visualize.ipynb) provided.
 
 ## Data
 
