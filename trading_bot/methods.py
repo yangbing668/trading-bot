@@ -95,7 +95,7 @@ def train_model(agent, episode, data, ep_count=100, batch_size=32, window_size=1
                 reward = diff * holdShare
             else:
                 pass
-        agent.remember(state, action, reward, next_state, done)
+        agent.remember(state, action, reward, next_state, done, actWeight)
 
         if len(agent.memory) > batch_size:
             loss = agent.train_experience_replay(batch_size)
@@ -337,7 +337,7 @@ def test_model(agent, data, window_size, debug, purchasingAbility=5, serviceChar
                     reward = diff * holdShare
                 # pass
                 history.append((data[t], "HOLD", 0))
-        agent.remember(state, action, reward, next_state, done)
+        agent.remember(state, action, reward, next_state, done, actWeight)
         if total_profit == 0 and agent.holdAmount > 0:
             bought_price = agent.holdAmount / holdShare
             total_profits.append(agent.holdAmount * (data[t] - bought_price) / bought_price)
