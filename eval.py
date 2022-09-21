@@ -20,7 +20,7 @@ def main(eval_stock, window_size, model_name, debug, purchasing_ability, service
 
 if __name__ == "__main__":
     import os
-    dirs = 'NASDAQ_models'
+    dirs = 'models'
     stock_names = os.listdir(dirs)
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  # 指定将要使用的GPU设备
     serviceChargeRate = 0.001
@@ -31,7 +31,7 @@ if __name__ == "__main__":
         strategy = 'dqn'
         window_size = 12
         batch_size = 20
-        ep_count = 10
+        ep_count = 50
         model_name = '{}_w{}_b{}_e{}'.format(stock_name, window_size, batch_size, ep_count)
         debug = False
         coloredlogs.install(level="DEBUG")
