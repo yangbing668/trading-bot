@@ -10,7 +10,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.models import load_model, clone_model
 from tensorflow.keras.layers import Dense, Input, BatchNormalization, Activation, Dropout, MaxPool1D
 from tensorflow.keras.optimizers import Adam
-# from keras_radam.training import RAdamOptimizer
+from keras_radam.training import RAdamOptimizer
 from trading_bot.MultiHeadAttention import MultiHeadSelfAttention
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
 import time
@@ -56,7 +56,7 @@ class Agent:
         self.learning_rate = 0.001
         self.loss = huber_loss
         self.custom_objects = {"huber_loss": huber_loss}  # important for loading the model from memory
-        self.optimizer = Adam(learning_rate=self.learning_rate)
+        self.optimizer = RAdamOptimizer(learning_rate=self.learning_rate)
 
         if pretrained and self.model_name is not None:
             self.model = self._model()
@@ -144,8 +144,7 @@ class Agent:
 
                 # update the target for current action based on discounted reward
                 q_values[0][action] = target
-                # weight = weight + self.gamma * np.amax(nextPre[0][0])/\
-                #          (reward+0.001) # avoid error when reward equals 0
+                weight = weight +data_t\(reward+1) # avoid reward equals 0
                 weight = x_weights
                 X_train.append(state[0])
                 y_train.append(q_values[0])
