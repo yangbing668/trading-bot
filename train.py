@@ -36,8 +36,8 @@ def main(train_stock, val_stock, window_size, batch_size, ep_count,
 
                                                                        purchasingAbility=purchasingAbility,
                                                                        serviceChargeRate=serviceChargeRate)
-        if train_result[2] > bestResult:
-            bestResult = train_result[2]
+        if val_result > bestResult:
+            bestResult = val_result
             agent.save()
         show_train_result(train_result, val_result, maxAmount)
 
