@@ -4,7 +4,9 @@ import os
 from docopt import docopt
 
 from trading_bot.agent import Agent
+# from trading_bot.agent_MLP import Agent
 from trading_bot.methods import train_model, evaluate_model
+# from trading_bot.methods_MLP import train_model, evaluate_model
 from trading_bot.utils import (
     get_stock_data,
     format_currency,
@@ -18,10 +20,12 @@ random.seed(1234)
 
 def main(train_stock, val_stock, window_size, batch_size, ep_count,
          strategy="t-dqn", model_name="model_debug", pretrained=False,
-         debug=False, purchasingAbility=5, serviceChargeRate=0.):
-    agent = Agent(window_size, strategy=strategy, pretrained=pretrained, model_name=model_name)
+         debug=False, memoryLenDefault=1000, serviceChargeRate=0.):
+    agent = Agent(window_size, strategy=strategy, pretrained=pretrained, model_name=model_name, memoryLenDefault=memoryLenDefault)
     train_data = get_stock_data(train_stock)
     val_data = get_stock_data(val_stock)
+    # val_data_reversed = list(reversed(val_data))
+    # val_data = val_data + val_data_reversed
 
     bestResult = -999999999999
     for episode in range(1, ep_count + 1):
@@ -32,17 +36,13 @@ def main(train_stock, val_stock, window_size, batch_size, ep_count,
 
                                                                        purchasingAbility=purchasingAbility,
                                                                        serviceChargeRate=serviceChargeRate)
-        if val_result > bestResult:
-            bestResult = val_result
+        if train_result[2] > bestResult:
+            bestResult = train_result[2]
             agent.save()
         show_train_result(train_result, val_result, maxAmount)
 
 
 if __name__ == "__main__":
-    import sys
-    f = open("output.txt", "w+")
-    sys.stdout = f
-    dirs = 'downloadData/Data/train/'
     stock_names = os.listdir(dirs)
     random.shuffle(stock_names)
     for i in range(30):
@@ -57,10 +57,10 @@ if __name__ == "__main__":
         strategy = 'dqn'
         window_size = 12
         batch_size = 20
-        ep_count = 10
+        ep_count = 50
         model_name = '{}_w{}_b{}_e{}'.format(stock_name, window_size, batch_size, ep_count)
         pretrained = False
-        debug = True
+        debug = False
 
         coloredlogs.install(level="DEBUG")
         # switch_k_backend_device()
@@ -68,7 +68,7 @@ if __name__ == "__main__":
         try:
             main(train_stock, val_stock, window_size, batch_size,
                  ep_count, strategy=strategy, model_name=model_name,
-                 pretrained=pretrained, debug=debug, purchasingAbility=purchasingAbility,
+                 pretrained=pretrained, debug=debug, memoryLenDefault=10000,
                  serviceChargeRate=serviceChargeRate)
         except KeyboardInterrupt:
             print("Aborted!")
