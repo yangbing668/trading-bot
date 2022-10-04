@@ -43,7 +43,8 @@ def main(train_stock, val_stock, window_size, batch_size, ep_count,
 
 
 if __name__ == "__main__":
-    stock_names = os.listdir(dirs)
+    stock_names = os.listdir(traindirs)
+    
     random.shuffle(stock_names)
     for i in range(30):
         stock_name = stock_names[i].split('.')[0]
@@ -52,15 +53,15 @@ if __name__ == "__main__":
         os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
         serviceChargeRate = 0.001
         purchasingAbility = 500
-        train_stock = dirs + stock_name + '.csv'
-        val_stock = dirs + stock_name + '.csv'
+        train_stock = traindirs + stock_name + '.csv'
+        val_stock = valdirs + stock_name + '.csv'
         strategy = 'dqn'
         window_size = 12
         batch_size = 20
         ep_count = 50
         model_name = '{}_w{}_b{}_e{}'.format(stock_name, window_size, batch_size, ep_count)
         pretrained = False
-        debug = False
+        debug = True
 
         coloredlogs.install(level="DEBUG")
         # switch_k_backend_device()
